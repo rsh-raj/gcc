@@ -418,6 +418,16 @@ struct fixed_point_type_info
       struct { tree numerator; tree denominator; } arbitrary;
     } scale_factor;
 };
+/*Struct to hold compilation unit header need for .debug_info*/
+typedef struct dw_cu_header_struct
+{
+    uint32_t length;
+    uint16_t version;
+    uint8_t unit_type;
+    uint8_t address_size;
+    uint32_t debug_abbrev_offset;
+}
+dw_cu_header;
 
 void dwarf2cfi_cc_finalize (void);
 void dwarf2out_cc_finalize (void);
