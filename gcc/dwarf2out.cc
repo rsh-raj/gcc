@@ -97,6 +97,12 @@ along with GCC; see the file COPYING3.  If not see
 #include "stringpool.h"
 #include "attribs.h"
 #include "file-prefix-map.h" /* remap_debug_filename()  */
+#include "cgraph.h"
+#include "debug.h"
+#include "function.h"
+#include "basic-block.h"
+#include "gimple.h"
+#include "lto-streamer.h"
 
 static void dwarf2out_source_line (unsigned int, unsigned int, const char *,
 				   int, bool);
@@ -10200,8 +10206,164 @@ output_abbrev_section (void)
     if (abbrev_id != 0)
       output_die_abbrevs (abbrev_id, abbrev);
 
+    /* Terminate the table.  */
+    dw2_asm_output_data (1, 0, NULL);
+}
+
+static void
+output_data_to_object_file(int size, unsigned HOST_WIDE_INT value)
+{
+
+  char *buff=XNEWVEC(char,size);
+
+  //handle little endian vs big endian. right now assuming little endian
+  for(int i=size-1;i>=0;i--)
+  {
+    buff[i] = value & 0xFF;
+    value >>= 8;
+  }
+
+  void *v;
+
+  lto_obj_append_data((const void *) buff, size, v);
+
+}
+
+static void
+output_data_uleb128_to_object_file(unsigned HOST_WIDE_INT value)
+{
+  int size=0, temp_value=value;
+
+  //find the size of uleb128 data
+  while(temp_value)
+  {
+    temp_value>>=7;
+    size++;
+  }
+
+  char *buff=XNEWVEC(char,size);
+
+  for(int i=0;i<size;i++)
+  {
+    int byte = (value & 0x7f);
+    value >>= 7;
+    if (value != 0)
+      /* More bytes to follow.  */
+      byte |= 0x80;
+    buff[i]=byte;
+  }
+
+  void *v;
+  lto_obj_append_data((const void *) buff, size, v);
+}
+
+static void
+output_data_sleb128_to_object_file(unsigned HOST_WIDE_INT value)
+{
+  int size=0, temp_value=value,more;
+
+  //find the size of sleb128 data
+  while(1)
+  {
+    int  byte = (value & 0x7f);
+    temp_value>>=7;
+    size++;
+    more = !((value == 0 && (byte & 0x40) == 0)
+		|| (value == -1 && (byte & 0x40) != 0));
+    if(!more) break;
+  }
+
+  char *buff=XNEWVEC(char,size);
+
+  for(int i=0;i<size;i++)
+  {
+    int byte = (value & 0x7f);
+    value >>= 7;
+    more = !((value == 0 && (byte & 0x40) == 0)
+		|| (value == -1 && (byte & 0x40) != 0));
+
+    if (more)
+      /* More bytes to follow.  */
+      byte |= 0x80;
+    buff[i]=byte;
+  }
+
+  void *v;
+  lto_obj_append_data((const void *) buff, size, v);
+}
+static void
+output_value_format_to_object_file (dw_attr_node *a)
+{
+  enum dwarf_form form = value_format (a);
+
+  output_data_uleb128_to_object_file(form);
+  // dw2_asm_output_data_uleb128 (form, "(%s)", dwarf_form_name (form));
+}
+
+/* Given a die and id, produce the appropriate abbreviations
+directly to lto object file */
+
+static void
+output_die_abbrevs_to_object_file(unsigned long abbrev_id, dw_die_ref abbrev)
+{
+  unsigned ix;
+  dw_attr_node *a_attr;
+
+  // dw2_asm_output_data_uleb128 (abbrev_id, "(abbrev code)");
+  // dw2_asm_output_data_uleb128 (abbrev->die_tag, "(TAG: %s)",
+  //                              dwarf_tag_name (abbrev->die_tag));
+  output_data_uleb128_to_object_file(abbrev_id);
+  output_data_uleb128_to_object_file(abbrev->die_tag);
+
+
+  if (abbrev->die_child != NULL)
+    output_data_to_object_file(1,DW_children_yes);
+    // dw2_asm_output_data (1, DW_children_yes, "DW_children_yes");
+  else
+    output_data_to_object_file(1,DW_children_no);
+    // dw2_asm_output_data (1, DW_children_no, "DW_children_no");
+
+  for (ix = 0; vec_safe_iterate (abbrev->die_attr, ix, &a_attr); ix++)
+    {
+      // dw2_asm_output_data_uleb128 (a_attr->dw_attr, "(%s)",
+      //                              dwarf_attr_name (a_attr->dw_attr));
+      output_data_uleb128_to_object_file(a_attr->dw_attr);
+      // output_value_format (a_attr);
+      output_value_format_to_object_file(a_attr);
+      if (value_format (a_attr) == DW_FORM_implicit_const)
+	{
+	  if (AT_class (a_attr) == dw_val_class_file_implicit)
+	    {
+	      int f = maybe_emit_file (a_attr->dw_attr_val.v.val_file);
+	      // const char *filename = a_attr->dw_attr_val.v.val_file->filename;
+	      // dw2_asm_output_data_sleb128 (f, "(%s)", filename);
+	output_data_sleb128_to_object_file(f);
+	    }
+	  else
+      output_data_sleb128_to_object_file(a_attr->dw_attr_val.v.val_int);
+	    // dw2_asm_output_data_sleb128 (a_attr->dw_attr_val.v.val_int, NULL);
+	}
+    }
+
+  output_data_to_object_file (1, 0);
+  output_data_to_object_file (1, 0);
+}
+
+
+static void
+output_abbrev_section_to_object_file (void)
+{
+  lto_obj_begin_section(".gnu.debuglto_.debug_abbrev");
+  unsigned int abbrev_id;
+  dw_die_ref abbrev;
+  FOR_EACH_VEC_SAFE_ELT (abbrev_die_table, abbrev_id, abbrev)
+    if (abbrev_id != 0)
+    output_die_abbrevs_to_object_file (abbrev_id, abbrev);
+
   /* Terminate the table.  */
-  dw2_asm_output_data (1, 0, NULL);
+  output_data_to_object_file (1, 0);
+  lto_obj_end_section();
+
 }
 
 /* Return a new location list, given the begin and end range, and the
@@ -11291,7 +11453,7 @@ output_comp_unit (dw_die_ref die, int output_if_empty,
     }
 
   /* Output debugging information.  */
-  output_compilation_unit_header (dwo_id
+output_compilation_unit_header (dwo_id
 				  ? DW_UT_split_compile : DW_UT_compile);
   if (dwarf_version >= 5)
     {
@@ -11308,6 +11470,463 @@ output_comp_unit (dw_die_ref die, int output_if_empty,
       unmark_dies (die);
       die->die_id.die_symbol = oldsym;
     }
+}
+
+static void
+output_die_to_object_file (dw_die_ref die)
+{
+  dw_attr_node *a;
+  dw_die_ref c;
+  unsigned long size;
+  unsigned ix;
+
+  // dw2_asm_output_data_uleb128 (die->die_abbrev, "(DIE (%#lx) %s)",
+	// 		       (unsigned long)die->die_offset,
+	// 		       dwarf_tag_name (die->die_tag));
+  //this outputs the abbreviation code for this die
+
+  output_data_uleb128_to_object_file(die->die_abbrev);
+  return; //as I haven't handled all of the possible cases below output the abbrev code and return
+
+
+  //ouput each attribute of this die
+  FOR_EACH_VEC_SAFE_ELT (die->die_attr, ix, a)
+    {
+      const char *name = dwarf_attr_name (a->dw_attr);
+
+      switch (AT_class (a))
+	{
+  case dw_val_class_addr:
+      //TO DO: will have to first read about rtx type
+      // dw2_asm_output_addr_rtx (DWARF2_ADDR_SIZE, AT_addr (a), "%s", name);
+      break;
+
+	case dw_val_class_offset:
+	  dw2_asm_output_data (dwarf_offset_size, a->dw_attr_val.v.val_offset,
+			       "%s", name);
+	  break;
+
+	case dw_val_class_range_list:
+	  // handle it later as We have to output this into a different section
+	  // output_range_list_offset (a);
+	  break;
+
+	case dw_val_class_loc:
+	  size = size_of_locs (AT_loc (a));
+
+	  /* Output the block length for this list of location operations.  */
+	  if (dwarf_version >= 4)
+	    dw2_asm_output_data_uleb128 (size, "%s", name);
+	  else
+	    dw2_asm_output_data (constant_size (size), size, "%s", name);
+
+	  output_loc_sequence (AT_loc (a), -1);
+	  break;
+
+	case dw_val_class_const:
+	  /* ??? It would be slightly more efficient to use a scheme like is
+	     used for unsigned constants below, but gdb 4.x does not sign
+	     extend.  Gdb 5.x does sign extend.  */
+	  dw2_asm_output_data_sleb128 (AT_int (a), "%s", name);
+	  break;
+
+	case dw_val_class_unsigned_const:
+	  {
+	    int csize = constant_size (AT_unsigned (a));
+	    if (dwarf_version == 3
+		&& a->dw_attr == DW_AT_data_member_location
+		&& csize >= 4)
+	      dw2_asm_output_data_uleb128 (AT_unsigned (a), "%s", name);
+	    else
+	      dw2_asm_output_data (csize, AT_unsigned (a), "%s", name);
+	  }
+	  break;
+
+	case dw_val_class_symview:
+	  {
+	    int vsize;
+	    if (symview_upper_bound <= 0xff)
+	      vsize = 1;
+	    else if (symview_upper_bound <= 0xffff)
+	      vsize = 2;
+	    else if (symview_upper_bound <= 0xffffffff)
+	      vsize = 4;
+	    else
+	      vsize = 8;
+	    dw2_asm_output_addr (vsize, a->dw_attr_val.v.val_symbolic_view,
+				 "%s", name);
+	  }
+	  break;
+
+	case dw_val_class_const_implicit:
+	  if (flag_debug_asm)
+	    fprintf (asm_out_file, "\t\t\t%s %s ("
+				   HOST_WIDE_INT_PRINT_DEC ")\n",
+		     ASM_COMMENT_START, name, AT_int (a));
+	  break;
+
+	case dw_val_class_unsigned_const_implicit:
+	  if (flag_debug_asm)
+	    fprintf (asm_out_file, "\t\t\t%s %s ("
+				   HOST_WIDE_INT_PRINT_HEX ")\n",
+		     ASM_COMMENT_START, name, AT_unsigned (a));
+	  break;
+
+	case dw_val_class_const_double:
+	  {
+	    unsigned HOST_WIDE_INT first, second;
+
+	    if (HOST_BITS_PER_WIDE_INT >= DWARF_LARGEST_DATA_FORM_BITS)
+	      dw2_asm_output_data (1,
+				   HOST_BITS_PER_DOUBLE_INT
+				   / HOST_BITS_PER_CHAR,
+				   NULL);
+
+	    if (WORDS_BIG_ENDIAN)
+	      {
+		first = a->dw_attr_val.v.val_double.high;
+		second = a->dw_attr_val.v.val_double.low;
+	      }
+	    else
+	      {
+		first = a->dw_attr_val.v.val_double.low;
+		second = a->dw_attr_val.v.val_double.high;
+	      }
+
+	    dw2_asm_output_data (HOST_BITS_PER_WIDE_INT / HOST_BITS_PER_CHAR,
+				 first, "%s", name);
+	    dw2_asm_output_data (HOST_BITS_PER_WIDE_INT / HOST_BITS_PER_CHAR,
+				 second, NULL);
+	  }
+	  break;
+
+	case dw_val_class_wide_int:
+	  {
+	    int i;
+	    int len = get_full_len (*a->dw_attr_val.v.val_wide);
+	    int l = HOST_BITS_PER_WIDE_INT / HOST_BITS_PER_CHAR;
+	    if (len * HOST_BITS_PER_WIDE_INT > DWARF_LARGEST_DATA_FORM_BITS)
+	      dw2_asm_output_data (1, get_full_len (*a->dw_attr_val.v.val_wide)
+				      * l, NULL);
+
+	    if (WORDS_BIG_ENDIAN)
+	      for (i = len - 1; i >= 0; --i)
+		{
+		  dw2_asm_output_data (l, a->dw_attr_val.v.val_wide->elt (i),
+				       "%s", name);
+		  name = "";
+		}
+	    else
+	      for (i = 0; i < len; ++i)
+		{
+		  dw2_asm_output_data (l, a->dw_attr_val.v.val_wide->elt (i),
+				       "%s", name);
+		  name = "";
+		}
+	  }
+	  break;
+
+	case dw_val_class_vec:
+	  {
+	    unsigned int elt_size = a->dw_attr_val.v.val_vec.elt_size;
+	    unsigned int len = a->dw_attr_val.v.val_vec.length;
+	    unsigned int i;
+	    unsigned char *p;
+
+	    dw2_asm_output_data (constant_size (len * elt_size),
+				 len * elt_size, "%s", name);
+	    if (elt_size > sizeof (HOST_WIDE_INT))
+	      {
+		elt_size /= 2;
+		len *= 2;
+	      }
+	    for (i = 0, p = (unsigned char *) a->dw_attr_val.v.val_vec.array;
+		 i < len;
+		 i++, p += elt_size)
+	      dw2_asm_output_data (elt_size, extract_int (p, elt_size),
+				   "fp or vector constant word %u", i);
+	    break;
+	  }
+
+	case dw_val_class_flag:
+	  if (dwarf_version >= 4)
+	    {
+	      /* Currently all add_AT_flag calls pass in 1 as last argument,
+		 so DW_FORM_flag_present can be used.  If that ever changes,
+		 we'll need to use DW_FORM_flag and have some optimization
+		 in build_abbrev_table that will change those to
+		 DW_FORM_flag_present if it is set to 1 in all DIEs using
+		 the same abbrev entry.  */
+	      gcc_assert (AT_flag (a) == 1);
+	      if (flag_debug_asm)
+		fprintf (asm_out_file, "\t\t\t%s %s\n",
+			 ASM_COMMENT_START, name);
+	      break;
+	    }
+	  dw2_asm_output_data (1, AT_flag (a), "%s", name);
+	  break;
+
+	case dw_val_class_loc_list:
+	  output_loc_list_offset (a);
+	  break;
+
+	case dw_val_class_view_list:
+	  output_view_list_offset (a);
+	  break;
+
+	case dw_val_class_die_ref:
+	  if (AT_ref_external (a))
+	    {
+	      if (AT_ref (a)->comdat_type_p)
+		{
+		  comdat_type_node *type_node
+		    = AT_ref (a)->die_id.die_type_node;
+
+		  gcc_assert (type_node);
+		  output_signature (type_node->signature, name);
+		}
+	      else
+		{
+		  const char *sym = AT_ref (a)->die_id.die_symbol;
+		  int size;
+
+		  gcc_assert (sym);
+		  /* In DWARF2, DW_FORM_ref_addr is sized by target address
+		     length, whereas in DWARF3 it's always sized as an
+		     offset.  */
+		  if (dwarf_version == 2)
+		    size = DWARF2_ADDR_SIZE;
+		  else
+		    size = dwarf_offset_size;
+		  /* ???  We cannot unconditionally output die_offset if
+		     non-zero - others might create references to those
+		     DIEs via symbols.
+		     And we do not clear its DIE offset after outputting it
+		     (and the label refers to the actual DIEs, not the
+		     DWARF CU unit header which is when using label + offset
+		     would be the correct thing to do).
+		     ???  This is the reason for the with_offset flag.  */
+		  if (AT_ref (a)->with_offset)
+		    dw2_asm_output_offset (size, sym, AT_ref (a)->die_offset,
+					   debug_info_section, "%s", name);
+		  else
+		    dw2_asm_output_offset (size, sym, debug_info_section, "%s",
+					   name);
+		}
+	    }
+	  else
+	    {
+	      gcc_assert (AT_ref (a)->die_offset);
+	      dw2_asm_output_data (dwarf_offset_size, AT_ref (a)->die_offset,
+				   "%s", name);
+	    }
+	  break;
+
+	case dw_val_class_fde_ref:
+	  {
+	    char l1[MAX_ARTIFICIAL_LABEL_BYTES];
+
+	    ASM_GENERATE_INTERNAL_LABEL (l1, FDE_LABEL,
+					 a->dw_attr_val.v.val_fde_index * 2);
+	    dw2_asm_output_offset (dwarf_offset_size, l1, debug_frame_section,
+				   "%s", name);
+	  }
+	  break;
+
+	case dw_val_class_vms_delta:
+#ifdef ASM_OUTPUT_DWARF_VMS_DELTA
+	  dw2_asm_output_vms_delta (dwarf_offset_size,
+				    AT_vms_delta2 (a), AT_vms_delta1 (a),
+				    "%s", name);
+#else
+	  dw2_asm_output_delta (dwarf_offset_size,
+				AT_vms_delta2 (a), AT_vms_delta1 (a),
+				"%s", name);
+#endif
+	  break;
+
+	case dw_val_class_lbl_id:
+	  output_attr_index_or_value (a);
+	  break;
+
+	case dw_val_class_lineptr:
+	  dw2_asm_output_offset (dwarf_offset_size, AT_lbl (a),
+				 debug_line_section, "%s", name);
+	  break;
+
+	case dw_val_class_macptr:
+	  dw2_asm_output_offset (dwarf_offset_size, AT_lbl (a),
+				 debug_macinfo_section, "%s", name);
+	  break;
+
+	case dw_val_class_loclistsptr:
+	  dw2_asm_output_offset (dwarf_offset_size, AT_lbl (a),
+				 debug_loc_section, "%s", name);
+	  break;
+
+	case dw_val_class_str:
+	  if (a->dw_attr_val.v.val_str->form == DW_FORM_strp)
+	    dw2_asm_output_offset (dwarf_offset_size,
+				   a->dw_attr_val.v.val_str->label,
+				   debug_str_section,
+				   "%s: \"%s\"", name, AT_string (a));
+	  else if (a->dw_attr_val.v.val_str->form == DW_FORM_line_strp)
+	    dw2_asm_output_offset (dwarf_offset_size,
+				   a->dw_attr_val.v.val_str->label,
+				   debug_line_str_section,
+				   "%s: \"%s\"", name, AT_string (a));
+	  else if (a->dw_attr_val.v.val_str->form == dwarf_FORM (DW_FORM_strx))
+	    dw2_asm_output_data_uleb128 (AT_index (a),
+					 "%s: \"%s\"", name, AT_string (a));
+	  else
+	    dw2_asm_output_nstring (AT_string (a), -1, "%s", name);
+	  break;
+
+	case dw_val_class_file:
+	  {
+	    int f = maybe_emit_file (a->dw_attr_val.v.val_file);
+
+	    dw2_asm_output_data (constant_size (f), f, "%s (%s)", name,
+				 a->dw_attr_val.v.val_file->filename);
+	    break;
+	  }
+
+	case dw_val_class_file_implicit:
+	  if (flag_debug_asm)
+	    fprintf (asm_out_file, "\t\t\t%s %s (%d, %s)\n",
+		     ASM_COMMENT_START, name,
+		     maybe_emit_file (a->dw_attr_val.v.val_file),
+		     a->dw_attr_val.v.val_file->filename);
+	  break;
+
+	case dw_val_class_data8:
+	  {
+	    int i;
+
+	    for (i = 0; i < 8; i++)
+	      dw2_asm_output_data (1, a->dw_attr_val.v.val_data8[i],
+				   i == 0 ? "%s" : NULL, name);
+	    break;
+	  }
+
+	case dw_val_class_high_pc:
+	  dw2_asm_output_delta (DWARF2_ADDR_SIZE, AT_lbl (a),
+				get_AT_low_pc (die), "DW_AT_high_pc");
+	  break;
+
+	case dw_val_class_discr_value:
+	  output_discr_value (&a->dw_attr_val.v.val_discr_value, name);
+	  break;
+
+	case dw_val_class_discr_list:
+	  {
+	    dw_discr_list_ref list = AT_discr_list (a);
+	    const int size = size_of_discr_list (list);
+
+	    /* This is a block, so output its length first.  */
+	    dw2_asm_output_data (constant_size (size), size,
+				 "%s: block size", name);
+
+	    for (; list != NULL; list = list->dw_discr_next)
+	      {
+		/* One byte for the discriminant value descriptor, and then as
+		   many LEB128 numbers as required.  */
+		if (list->dw_discr_range)
+		  dw2_asm_output_data (1, DW_DSC_range,
+				       "%s: DW_DSC_range", name);
+		else
+		  dw2_asm_output_data (1, DW_DSC_label,
+				       "%s: DW_DSC_label", name);
+
+		output_discr_value (&list->dw_discr_lower_bound, name);
+		if (list->dw_discr_range)
+		  output_discr_value (&list->dw_discr_upper_bound, name);
+	      }
+	    break;
+	  }
+
+	default:
+	  gcc_unreachable ();
+	}
+    }
+
+  FOR_EACH_CHILD (die, c, output_die_to_object_file (c));
+
+  /* Add null byte to terminate sibling list.  */
+  // if (die->die_child != NULL)
+    // dw2_asm_output_data (1, 0, "end of children of DIE %#lx",
+		// 	 (unsigned long) die->die_offset);
+}
+
+static void
+output_compilation_unit_header_to_object_file(enum dwarf_unit_type ut)
+{
+  lto_obj_begin_section(".gnu.debuglto_.debug_info");
+  dw_cu_header *cu_header;
+  cu_header = XNEW(dw_cu_header);
+  cu_header->length = next_die_offset - DWARF_INITIAL_LENGTH_SIZE;
+  cu_header->version = dwarf_version;
+  cu_header->unit_type = ut;
+  cu_header->address_size = DWARF2_ADDR_SIZE;
+  cu_header->debug_abbrev_offset = 0x0;
+  void *v;
+  lto_obj_append_data((const void *)cu_header,sizeof(dw_cu_header),v);
+
+}
+
+static void
+output_comp_unit_to_object_file (dw_die_ref die, int output_if_empty,
+		  const unsigned char *dwo_id)
+{
+  const char *secname, *oldsym;
+  char *tmp;
+
+  /* Unless we are outputting main CU, we may throw away empty ones.  */
+  if (!output_if_empty && die->die_child == NULL)
+    return;
+
+  /* Even if there are no children of this DIE, we must output the information
+     about the compilation unit.  Otherwise, on an empty translation unit, we
+     will generate a present, but empty, .debug_info section.  IRIX 6.5 `nm'
+     will then complain when examining the file.  First mark all the DIEs in
+     this CU so we know which get local refs.  */
+  mark_dies (die);
+
+  external_ref_hash_type *extern_map = optimize_external_refs (die);
+
+  /* For now, optimize only the main CU, in order to optimize the rest
+     we'd need to see all of them earlier.  Leave the rest for post-linking
+     tools like DWZ.  */
+  if (die == comp_unit_die ())
+    abbrev_opt_start = vec_safe_length (abbrev_die_table);
+
+  build_abbrev_table (die, extern_map);
+
+  optimize_abbrev_table ();
+
+  delete extern_map;
+
+  /* Initialize the beginning DIE offset - and calculate sizes/offsets.  */
+  next_die_offset = (dwo_id
+		     ? DWARF_COMPILE_UNIT_SKELETON_HEADER_SIZE
+		     : DWARF_COMPILE_UNIT_HEADER_SIZE);
+  calc_die_sizes (die);
+
+  oldsym = die->die_id.die_symbol;
+
+  output_compilation_unit_header_to_object_file(dwo_id
+	? DW_UT_split_compile : DW_UT_compile);
+  output_die_to_object_file(die);
+  lto_obj_end_section();
+
+  /* Leave the marks on the main CU, so we can check them in
+     output_pubnames.  */
+  if (oldsym)
+    {
+      unmark_dies (die);
+      die->die_id.die_symbol = oldsym;
+    }
+
 }
 
 /* Whether to generate the DWARF accelerator tables in .debug_pubnames
@@ -27776,7 +28395,7 @@ maybe_emit_file (struct dwarf_file_data * fd)
 	fd->emitted_number = 1;
       last_emitted_file = fd;
 
-      if (output_asm_line_debug_info ())
+      if (!flag_bypass_asm && output_asm_line_debug_info ())
 	{
 	  fprintf (asm_out_file, "\t.file %u ", fd->emitted_number);
 	  output_quoted_string (asm_out_file, fd->filename);
@@ -29343,7 +29962,7 @@ static unsigned
 init_sections_and_labels (bool early_lto_debug)
 {
   if (early_lto_debug)
-    {
+{
       if (!dwarf_split_debug_info)
 	{
 	  debug_info_section = get_section (DEBUG_LTO_INFO_SECTION,
@@ -29404,6 +30023,7 @@ init_sections_and_labels (bool early_lto_debug)
 					       SECTION_DEBUG | SECTION_EXCLUDE,
 					       NULL);
 	}
+
       /* For macro info and the file table we have to refer to a
 	 debug_line section.  */
       debug_line_section = get_section (DEBUG_LTO_LINE_SECTION,
@@ -29419,7 +30039,9 @@ init_sections_and_labels (bool early_lto_debug)
 	debug_line_str_section
 	  = get_section (DEBUG_LTO_LINE_STR_SECTION,
 			 DEBUG_STR_SECTION_FLAGS | SECTION_EXCLUDE, NULL);
-    }
+}
+
+
   else
     {
       if (!dwarf_split_debug_info)
@@ -29512,6 +30134,9 @@ init_sections_and_labels (bool early_lto_debug)
       debug_frame_section = get_section (DEBUG_FRAME_SECTION,
 					 SECTION_DEBUG, NULL);
     }
+
+
+
 
   ASM_GENERATE_INTERNAL_LABEL (abbrev_section_label,
 			       DEBUG_ABBREV_SECTION_LABEL,
@@ -33114,11 +33739,14 @@ dwarf2out_early_finish (const char *filename)
       || TARGET_PECOFF || TARGET_COFF)
     return;
 
+
+    ////this is main working area(section is outputted in assembly file here)
+
   /* Now as we are going to output for LTO initialize sections and labels
      to the LTO variants.  We don't need a random-seed postfix as other
      LTO sections as linking the LTO debug sections into one in a partial
      link is fine.  */
-  init_sections_and_labels (true);
+  init_sections_and_labels (true) ;
 
   /* The output below is modeled after dwarf2out_finish with all
      location related output removed and some LTO specific changes.
@@ -33160,7 +33788,7 @@ dwarf2out_early_finish (const char *filename)
     }
 
   /* Output all of the compilation units.  We put the main one last so that
-     the offsets are available to output_pubnames.  */
+     the offsets are available to output_pubnames.  */ //will handle this later
   for (limbo_die_node *node = limbo_die_list; node; node = node->next)
     output_comp_unit (node->die, 0, NULL);
 
@@ -33191,55 +33819,61 @@ dwarf2out_early_finish (const char *filename)
 
   /* Output the main compilation unit.  We always need it if only for
      the CU symbol.  */
-  output_comp_unit (comp_unit_die (), true, NULL);
+  if(!flag_bypass_asm)
+  {
+    output_comp_unit (comp_unit_die (), true, NULL);
+    /* Output the abbreviation table.  */
+    if (vec_safe_length (abbrev_die_table) != 1)
+      {
+	switch_to_section (debug_abbrev_section);
+	ASM_OUTPUT_LABEL (asm_out_file, abbrev_section_label);
+	output_abbrev_section ();
+      }
 
-  /* Output the abbreviation table.  */
-  if (vec_safe_length (abbrev_die_table) != 1)
+    /* Have to end the macro section.  */
+    if (have_macinfo)
+      {
+	/* We have to save macinfo state if we need to output it again
+    for the FAT part of the object.  */
+	vec<macinfo_entry, va_gc> *saved_macinfo_table = macinfo_table;
+	if (flag_fat_lto_objects)
+    macinfo_table = macinfo_table->copy ();
+
+	switch_to_section (debug_macinfo_section);
+	ASM_OUTPUT_LABEL (asm_out_file, macinfo_section_label);
+	output_macinfo (debug_line_section_label, true);
+	dw2_asm_output_data (1, 0, "End compilation unit");
+
+	if (flag_fat_lto_objects)
     {
-      switch_to_section (debug_abbrev_section);
-      ASM_OUTPUT_LABEL (asm_out_file, abbrev_section_label);
-      output_abbrev_section ();
+      vec_free (macinfo_table);
+      macinfo_table = saved_macinfo_table;
     }
+      }
 
-  /* Have to end the macro section.  */
-  if (have_macinfo)
-    {
-      /* We have to save macinfo state if we need to output it again
-	 for the FAT part of the object.  */
-      vec<macinfo_entry, va_gc> *saved_macinfo_table = macinfo_table;
-      if (flag_fat_lto_objects)
-	macinfo_table = macinfo_table->copy ();
+    /* Emit a skeleton debug_line section.  */
+    switch_to_section (debug_line_section);
+    ASM_OUTPUT_LABEL (asm_out_file, debug_line_section_label);
+    output_line_info (true);
 
-      switch_to_section (debug_macinfo_section);
-      ASM_OUTPUT_LABEL (asm_out_file, macinfo_section_label);
-      output_macinfo (debug_line_section_label, true);
-      dw2_asm_output_data (1, 0, "End compilation unit");
-
-      if (flag_fat_lto_objects)
-	{
-	  vec_free (macinfo_table);
-	  macinfo_table = saved_macinfo_table;
-	}
-    }
-
-  /* Emit a skeleton debug_line section.  */
-  switch_to_section (debug_line_section);
-  ASM_OUTPUT_LABEL (asm_out_file, debug_line_section_label);
-  output_line_info (true);
-
-  /* If we emitted any indirect strings, output the string table too.  */
-  if (debug_str_hash || skeleton_debug_str_hash)
-    output_indirect_strings ();
-  if (debug_line_str_hash)
-    {
-      switch_to_section (debug_line_str_section);
-      const enum dwarf_form form = DW_FORM_line_strp;
-      debug_line_str_hash->traverse<enum dwarf_form,
-				    output_indirect_string> (form);
-    }
-
-  /* Switch back to the text section.  */
-  switch_to_section (text_section);
+    /* If we emitted any indirect strings, output the string table too.  */
+    if (debug_str_hash || skeleton_debug_str_hash)
+      output_indirect_strings ();
+    if (debug_line_str_hash)
+      {
+	switch_to_section (debug_line_str_section);
+	const enum dwarf_form form = DW_FORM_line_strp;
+	debug_line_str_hash->traverse<enum dwarf_form,
+	      output_indirect_string> (form);
+      }
+    /* Switch back to the text section.  */
+    switch_to_section (text_section);
+  }
+  else
+  {
+    output_comp_unit_to_object_file(comp_unit_die(), true, NULL);
+    output_abbrev_section_to_object_file();
+  }
 }
 
 /* Reset all state within dwarf2out.cc so that we can rerun the compiler
