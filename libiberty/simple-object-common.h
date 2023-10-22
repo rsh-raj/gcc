@@ -73,9 +73,17 @@ struct simple_object_symbol_struct
   /*The name of this symbol. */
   char *name;
   /* Symbol value */
-  unsigned int align;
+  unsigned int value;
   /* Symbol size */
   size_t size;  
+  /*Symbol binding*/
+  unsigned char bind;
+  /*Symbol info*/
+  unsigned char type;
+  /*Symbol section index*/
+  unsigned short int shndx;
+  /* Symbol visibility */
+  unsigned char st_other;
 };
 
 /* A section in an object file being created.  */
@@ -93,6 +101,11 @@ struct simple_object_write_section_struct
   struct simple_object_write_section_buffer *buffers;
   /* The last data attached to this section.  */
   struct simple_object_write_section_buffer *last_buffer;
+  /*The first relocation attached to this section. */
+  struct simple_object_write_section_relocation *relocations;
+  /* The last relocation attache to this section. */
+  struct simple_object_write_section_relocation *last_relocation;
+  
 };
 
 /* Data attached to a section.  */
@@ -107,6 +120,19 @@ struct simple_object_write_section_buffer
   const void *buffer;
   /* A buffer to free, or NULL.  */
   void *free_buffer;
+};
+struct simple_object_write_section_relocation
+{
+  /* The next relocation for this section. */
+  struct simple_object_write_section_relocation *next;
+  /* The offset. */
+  unsigned long offset;
+  /* Addend */
+  long addend;
+  /* Relocation symbol */
+  const char *name;
+  /* Relocation symbol st_shndx wrt .debug_info index */
+  unsigned long rel_sec_idx;
 };
 
 /* The number of bytes we read from the start of the file to pass to
