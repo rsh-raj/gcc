@@ -186,6 +186,14 @@ simple_object_write_add_data (simple_object_write *simple_object,
 			      simple_object_write_section *section,
 			      const void *buffer, size_t size,
 			      int copy, int *err);
+/* Add relocation to SECTION in SIMPLE_OBJECT */
+void
+simple_object_write_add_relocation (simple_object_write_section *section,
+			      unsigned long offset, long addend, const char *name, unsigned long rel_sec_idx);
+
+/* Modifies simple object section buffer at offset. */
+void simple_object_modify_buffer (simple_object_write_section *section, 
+                  unsigned long offset, unsigned char *buffer, int copy);
 
 /* Write the complete object file to DESCRIPTOR, an open file
    descriptor.  This returns NULL on success.  On error this returns
@@ -199,7 +207,8 @@ simple_object_write_to_file (simple_object_write *simple_object,
 object_write_to_file function*/
 extern void
 simple_object_write_add_symbol(simple_object_write *sobj, const char *name,
-size_t size, unsigned int align);
+               unsigned int value, size_t size, unsigned char bind, 
+               unsigned char type, unsigned short int shndx, unsigned char st_other);
 
 /* Release all resources associated with SIMPLE_OBJECT, including any
    simple_object_write_section's that may have been created.  */

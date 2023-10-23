@@ -238,6 +238,7 @@ typedef struct
 #define STT_NOTYPE	0	/* Symbol type is unspecified */
 #define STT_OBJECT	1	/* Symbol is a data object */
 #define STT_FUNC	2	/* Symbol is a code object */
+#define STT_SECTION 3 /* Symbol is associate with a section */
 #define STT_TLS		6	/* Thread local data object */
 #define STT_GNU_IFUNC	10	/* Symbol is an indirect code object */
 
@@ -247,6 +248,63 @@ typedef struct
 
 #define STV_DEFAULT	0	/* Visibility is specified by binding type */
 #define STV_HIDDEN	2	/* Can only be seen inside currect component */
+
+typedef struct
+{
+  unsigned char r_offset[4]; /* Address */
+  unsigned char r_info[4];  /* relocation type and symbol index */
+} Elf32_External_Rel;
+
+typedef struct
+{
+  unsigned char	r_offset[8];		/* Address */
+  unsigned char	r_info[8];			/* Relocation type and symbol index */
+} Elf64_External_Rel;
+typedef struct
+{
+  unsigned char r_offset[4]; /* Address */
+  unsigned char r_info[4];  /* Relocation type and symbol index */
+  char r_addend[4]; /* Addend */
+} Elf32_External_Rela;
+typedef struct
+{
+  unsigned char	r_offset[8];		/* Address */
+  unsigned char	r_info[8];			/* Relocation type and symbol index */
+  unsigned char	r_addend[8];		/* Addend */
+} Elf64_External_Rela; 
+
+/* How to extract and insert information held in the r_info field.  */
+
+#define ELF32_R_SYM(val)		((val) >> 8)
+#define ELF32_R_TYPE(val)		((val) & 0xff)
+#define ELF32_R_INFO(sym, type)		(((sym) << 8) + ((type) & 0xff))
+
+#define ELF64_R_SYM(i)			((i) >> 32)
+#define ELF64_R_TYPE(i)			((i) & 0xffffffff)
+#define ELF64_R_INFO(sym,type)		((((unsigned long) (sym)) << 32) + (type))
+
+/* AMD x86-64 relocations.  */
+#define R_X86_64_NONE		0	/* No reloc */
+#define R_X86_64_64		1	/* Direct 64 bit  */
+#define R_X86_64_PC32		2	/* PC relative 32 bit signed */
+#define R_X86_64_GOT32		3	/* 32 bit GOT entry */
+#define R_X86_64_PLT32		4	/* 32 bit PLT address */
+#define R_X86_64_COPY		5	/* Copy symbol at runtime */
+#define R_X86_64_GLOB_DAT	6	/* Create GOT entry */
+#define R_X86_64_JUMP_SLOT	7	/* Create PLT entry */
+#define R_X86_64_RELATIVE	8	/* Adjust by program base */
+#define R_X86_64_GOTPCREL	9	/* 32 bit signed PC relative
+					   offset to GOT */
+#define R_X86_64_32		10	/* Direct 32 bit zero extended */
+#define R_X86_64_32S		11	/* Direct 32 bit sign extended */
+#define R_X86_64_16		12	/* Direct 16 bit zero extended */
+
+/* Index into relocation symbol array */
+#define DEBUG_INFO_IDX 0
+#define DEBUG_ABBREV_IDX 1
+#define DEBUG_STR_IDX 2
+#define DEBUG_LINE_IDX 3
+#define DEBUG_LINE_STR_IDX 4
 
 /* Functions to fetch and store different ELF types, depending on the
    endianness and size.  */
@@ -784,7 +842,11 @@ simple_object_elf_write_ehdr (simple_object_write *sobj, int descriptor,
 
   shnum = 0;
   for (section = sobj->sections; section != NULL; section = section->next)
+  {
     ++shnum;
+    if(section->relocations)
+      ++shnum;
+  }
   if (shnum > 0)
     {
       /* Add a section header for the dummy section, 
@@ -891,7 +953,7 @@ simple_object_elf_write_shdr (simple_object_write *sobj, int descriptor,
 
 static int 
 simple_object_elf_write_symbol(simple_object_write *sobj, int descriptor,
-            off_t offset, unsigned int st_name, unsigned int st_value, size_t st_size,
+            off_t offset, unsigned int st_name, unsigned long int st_value, size_t st_size,
             unsigned char st_info, unsigned char st_other, unsigned int st_shndx, 
             const char **errmsg, int *err)
 {
@@ -900,37 +962,56 @@ simple_object_elf_write_symbol(simple_object_write *sobj, int descriptor,
   const struct elf_type_functions* fns;
   unsigned char cl;
   size_t sym_size;
-  unsigned char buf[sizeof (Elf64_External_Shdr)];
+  unsigned char buf[sizeof (Elf64_External_Sym)];
 
   fns = attrs->type_functions;
   cl = attrs->ei_class;
 
   sym_size = (cl == ELFCLASS32
-	       ? sizeof (Elf32_External_Shdr)
-	       : sizeof (Elf64_External_Shdr));
-  memset (buf, 0, sizeof (Elf64_External_Shdr));
+	       ? sizeof (Elf32_External_Sym)
+	       : sizeof (Elf64_External_Sym));
+  memset (buf, 0, sizeof (Elf64_External_Sym));
 
-  if(cl==ELFCLASS32)
-  {
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_name, Elf_Word, st_name);
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_value, Elf_Addr, st_value);
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_size, Elf_Addr, st_size);  
-    buf[4]=st_info;
-    buf[5]=st_other;
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_shndx, Elf_Half, st_shndx);
-  }
-  else
-  {
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_name, Elf_Word, st_name);
-    buf[4]=st_info;
-    buf[5]=st_other;
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_shndx, Elf_Half, st_shndx);
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_value, Elf_Addr, st_value);
-    ELF_SET_FIELD(fns, cl, Sym, buf, st_size, Elf_Addr, st_size);  
-  }
+  ELF_SET_FIELD(fns, cl, Sym, buf, st_name, Elf_Word, st_name);
+  ELF_SET_FIELD(fns, cl, Sym, buf, st_value, Elf_Addr, st_value);
+  ELF_SET_FIELD(fns, cl, Sym, buf, st_size, Elf_Addr, st_size);  
+  buf[4]=st_info;
+  buf[5]=st_other;
+  ELF_SET_FIELD(fns, cl, Sym, buf, st_shndx, Elf_Half, st_shndx);
+
   return simple_object_internal_write(descriptor, offset,buf,sym_size,
               errmsg,err); 
 }
+
+/* Write out an ELF R_X86_64_32 relocation entry */
+
+static int 
+simple_object_elf_write_relocation(simple_object_write *sobj, int descriptor,
+            off_t offset, unsigned long r_offset, unsigned long r_info, 
+            long r_addend, const char **errmsg, int *err)
+{
+  struct simple_object_elf_attributes *attrs =
+    (struct simple_object_elf_attributes *) sobj->data;
+  const struct elf_type_functions* fns;
+  unsigned char cl;
+  size_t rel_size;
+  unsigned char buf[sizeof (Elf64_External_Rela)];
+
+  fns = attrs->type_functions;
+  cl = attrs->ei_class;
+
+  rel_size =  cl == ELFCLASS32? sizeof(Elf32_External_Rela):
+    sizeof(Elf64_External_Rela);
+	       
+  memset (buf, 0, sizeof (Elf64_External_Rela));
+  ELF_SET_FIELD(fns, cl, Rela, buf, r_offset, Elf_Addr, r_offset);
+  ELF_SET_FIELD(fns, cl, Rela, buf, r_info, Elf_Addr, r_info);
+  ELF_SET_FIELD(fns, cl, Rela, buf, r_addend, Elf_Addr, r_addend);  
+  
+  return simple_object_internal_write(descriptor, offset, buf, rel_size,
+              errmsg,err); 
+}
+
 
 /* Write out a complete ELF file.
    Ehdr
@@ -978,15 +1059,19 @@ simple_object_elf_write_to_file (simple_object_write *sobj, int descriptor,
 
   shnum = 0;
   for (section = sobj->sections; section != NULL; section = section->next)
+  {
     ++shnum;
+    /* count the relocation section too if there exist any relocations */
+    if(section->relocations) ++shnum;
+  }
   if (shnum == 0)
     return NULL;
 
   /* Add initial dummy Shdr and  .shstrtab */
   shnum += 2;
    /*add initial .symtab and .strtab if symbol exists */
-      if(sobj->symbols) 
-        shnum += 2; 
+  if(sobj->symbols) 
+    shnum += 2; 
 
   shdr_offset = ehdr_size;
   sh_offset = shdr_offset + shnum * shdr_size;
@@ -1008,6 +1093,15 @@ simple_object_elf_write_to_file (simple_object_write *sobj, int descriptor,
 
   sh_name = 1;
   secnum = 0;
+  unsigned int section_idx = 1;
+  unsigned int debug_info_idx=1;
+  /* Relocation symbol index will start from 1, 0 being dummy symbol */
+  unsigned long sym_idx = 1;
+  /* An array to store the .symtab index of relocation symbol */
+  unsigned long rel_symtab_idx[5];
+  for(int i=0; i<5; i++) 
+    rel_symtab_idx[i] = -1;
+  
   for (section = sobj->sections; section != NULL; section = section->next)
     {
       size_t mask;
@@ -1087,7 +1181,69 @@ simple_object_elf_write_to_file (simple_object_write *sobj, int descriptor,
       shdr_offset += shdr_size;
       sh_name += strlen (section->name) + 1;
       sh_offset += sh_size;
+      if(!strcmp(section->name,".gnu.debuglto_.debug_info"))
+        debug_info_idx=section_idx;
+      ++section_idx;
+      /* If the section has relocation, write out the relocation section */
+      if( section->relocations)
+      {
+        sh_size=0;
+        struct simple_object_write_section_relocation *relocation;
+        sh_entsize = cl == ELFCLASS32 ? sizeof(Elf32_External_Rela) : sizeof(Elf64_External_Rela);
+
+        for(relocation = section->relocations; relocation != NULL; relocation = relocation->next)
+        {
+          
+          int idx=-1;
+          if(!strcmp(relocation->name,".gnu.debuglto_.debug_info"))
+            idx=DEBUG_INFO_IDX;
+          else if(!strcmp(relocation->name,".gnu.debuglto_.debug_abbrev"))
+            idx=DEBUG_ABBREV_IDX;
+          else if(!strcmp(relocation->name,".gnu.debuglto_.debug_str"))
+            idx=DEBUG_STR_IDX;
+          else if(!strcmp(relocation->name,".gnu.debuglto_.debug_line"))
+            idx=DEBUG_LINE_IDX;
+          else if(!strcmp(relocation->name,".gnu.debuglto_.debug_line_str"))
+            idx=DEBUG_LINE_STR_IDX;
+          if(idx < 0)
+            continue;
+          /* Add the relocation symbol to .symtab if it hasn't been already added */
+          if(rel_symtab_idx[idx]==(unsigned long)-1)
+          {
+            simple_object_write_add_symbol(sobj,relocation->name, 0, 0, 
+                    STB_LOCAL, STT_SECTION, relocation->rel_sec_idx+debug_info_idx,0);
+            rel_symtab_idx[idx]=sym_idx;
+            sym_idx++;
+          }
+          /* write the relocation entry */
+          unsigned long r_info = cl==ELFCLASS32 ? ELF32_R_INFO(rel_symtab_idx[idx], R_X86_64_32):
+            ELF64_R_INFO(rel_symtab_idx[idx], R_X86_64_32);
+          if(!simple_object_elf_write_relocation(sobj, descriptor, sh_offset+sh_size, 
+                relocation->offset, r_info, relocation->addend, &errmsg, err))
+                return errmsg;
+          sh_size+=sh_entsize;
+
+        }
+
+        sh_addralign = cl==ELFCLASS32 ? 0x04 : 0x08;
+
+        if (!simple_object_elf_write_shdr (sobj, descriptor, shdr_offset,
+            sh_name, SHT_RELA, SHF_INFO_LINK,
+            0, sh_offset,
+            sh_size, shnum-3, section_idx-1,
+            sh_addralign, sh_entsize,
+            &errmsg, err))
+            return errmsg;
+        
+
+        shdr_offset += shdr_size;
+        sh_name += (strlen(".rela")+strlen(section->name) + 1);
+        sh_offset += sh_size;
+        ++section_idx;
+      }
+
     }
+
   /*Write out the whole .symtab and .strtab*/
   if(sobj->symbols)
   {
@@ -1097,43 +1253,73 @@ simple_object_elf_write_to_file (simple_object_write *sobj, int descriptor,
     for(symbol=sobj->symbols; symbol!=NULL; symbol=symbol->next)
     {
       ++num_sym;
-    } 
+    }
 
-    size_t sym_size = cl==ELFCLASS32?sizeof(Elf32_External_Sym):sizeof(Elf64_External_Sym);
-    size_t sh_addralign = cl==ELFCLASS32?0x04:0x08;
-    size_t sh_entsize = sym_size;
-    size_t sh_size = num_sym*sym_size;
-    unsigned int sh_info = 2;
+    unsigned int st_name_size = 1;
+    unsigned int num_local_sym = 0;
+    size_t sh_entsize= cl==ELFCLASS32 ? sizeof(Elf32_External_Sym) : sizeof(Elf64_External_Sym);
+    size_t sh_addralign = cl==ELFCLASS32 ? 0x04 : 0x08;
+    size_t sh_size = 0;
+
+    /*Writes out the dummy symbol */
+    if(!simple_object_elf_write_symbol(sobj, descriptor, sh_offset,
+          0,0,0,0,0,SHN_UNDEF,&errmsg,err))
+      return errmsg;
+    sh_size += sh_entsize;
+     
+    /* First write all local symbols */
+    for(symbol=sobj->symbols; symbol!=NULL; symbol=symbol->next)
+    {
+      if(symbol->bind!=STB_LOCAL) 
+        continue;
+      ++num_local_sym;
+      unsigned int st_value = symbol->value;
+      unsigned int st_size = symbol->size;
+      unsigned short int st_shndx = symbol->shndx==(unsigned short int)-1 ? SHN_COMMON : symbol->shndx;
+      unsigned char st_info = ELF_ST_INFO(symbol->bind,symbol->type);
+      unsigned char st_other = symbol->st_other;
+
+      if(!simple_object_elf_write_symbol(sobj, descriptor, sh_offset+sh_size,
+          st_name_size,st_value,st_size,st_info,st_other,st_shndx,&errmsg,err))
+        return errmsg;
+
+      sh_size += sh_entsize; 
+      st_name_size += strlen(symbol->name)+1;
+
+    }
+    /* Write out the global and other symbols */
+    for(symbol=sobj->symbols; symbol!=NULL; symbol=symbol->next)
+    {
+      if(symbol->bind==STB_LOCAL)
+        continue;
+      unsigned int st_value = symbol->value;
+      unsigned int st_size = symbol->size;
+      unsigned short int st_shndx = symbol->shndx==(unsigned short int)-1 ? SHN_COMMON : symbol->shndx;
+      unsigned char st_info = ELF_ST_INFO(symbol->bind,symbol->type);
+      unsigned char st_other = symbol->st_other;
+
+      if(!simple_object_elf_write_symbol(sobj, descriptor, sh_offset+sh_size,
+          st_name_size,st_value,st_size,st_info,st_other,st_shndx,&errmsg,err))
+        return errmsg;
+
+      sh_size += sh_entsize; 
+      st_name_size += strlen(symbol->name)+1;
+
+    }
+
+    unsigned int sh_info = num_local_sym+1;
     if (!simple_object_elf_write_shdr (sobj, descriptor, shdr_offset,
               sh_name, SHT_SYMTAB, 0, 0, sh_offset,
               sh_size, shnum-2, sh_info,
               sh_addralign,sh_entsize, &errmsg, err))
       return errmsg;
     shdr_offset += shdr_size;
+    sh_offset+=sh_size;
     sh_name += strlen(".symtab")+1;
-    /*Writes out the dummy symbol */
-
-    if(!simple_object_elf_write_symbol(sobj, descriptor, sh_offset,
-          0,0,0,0,0,SHN_UNDEF,&errmsg,err))
-      return errmsg;
-    sh_offset += sym_size;
-    unsigned int st_name=1;
-    for(symbol=sobj->symbols; symbol!=NULL; symbol=symbol->next)
-    {
-      unsigned int st_value = 1;
-      unsigned int st_size = 1;
-      unsigned char st_info = 17;
-      if(!simple_object_elf_write_symbol(sobj, descriptor, sh_offset,
-          st_name,st_value,st_size,st_info,0,SHN_COMMON,&errmsg,err))
-        return errmsg;
-      sh_offset += sym_size; 
-      st_name += strlen(symbol->name)+1;
-
-    }
 
     if (!simple_object_elf_write_shdr (sobj, descriptor, shdr_offset,
               sh_name, SHT_STRTAB, 0, 0, sh_offset,
-              st_name, 0, 0,
+              st_name_size, 0, 0,
               1, 0, &errmsg, err))
       return errmsg;
     shdr_offset += shdr_size;
@@ -1144,10 +1330,25 @@ simple_object_elf_write_to_file (simple_object_write *sobj, int descriptor,
               &errmsg, err))
       return errmsg;
     ++sh_offset;
+    /* write out the local symbols name */
+    for(symbol = sobj->symbols; symbol!=NULL; symbol = symbol->next)
+    {
+      if(symbol->bind != STB_LOCAL)
+        continue;
+      size_t len = strlen(symbol->name)+1;
+      if (!simple_object_internal_write (descriptor, sh_offset,
+            (const unsigned char *) symbol->name,
+            len, &errmsg, err))
+    return errmsg;
+        sh_offset += len;
 
+    }
+    /* write out the global and other symbols name */
     for(symbol=sobj->symbols;symbol!=NULL;symbol=symbol->next)
     {
-      size_t len=strlen(symbol->name)+1;
+      if(symbol->bind == STB_LOCAL)
+        continue;
+      size_t len = strlen(symbol->name)+1;
       if (!simple_object_internal_write (descriptor, sh_offset,
             (const unsigned char *) symbol->name,
             len, &errmsg, err))
@@ -1179,6 +1380,22 @@ simple_object_elf_write_to_file (simple_object_write *sobj, int descriptor,
 					 len, &errmsg, err))
 	return errmsg;
       sh_offset += len;
+
+      if(section->relocations)
+      {
+        /* Adds the .rela prefix and write it to .shstrtab */
+         if (!simple_object_internal_write (descriptor, sh_offset,
+					 (const unsigned char *) ".rela",strlen(".rela"), &errmsg, err))
+            return errmsg;    
+          
+        sh_offset += strlen(".rela");
+        len = strlen (section->name) + 1;
+        if (!simple_object_internal_write (descriptor, sh_offset,
+            (const unsigned char *) section->name,
+            len, &errmsg, err))
+            return errmsg;
+        sh_offset += len;
+      }
     }
   /*Adds the name .symtab and .strtab*/
   if(sobj->symbols)

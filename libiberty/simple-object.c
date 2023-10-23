@@ -476,6 +476,8 @@ simple_object_write_create_section (simple_object_write *sobj, const char *name,
   ret->align = align;
   ret->buffers = NULL;
   ret->last_buffer = NULL;
+  ret->relocations = NULL;
+  ret->last_relocation = NULL;
 
   if (sobj->last_section == NULL)
     {
@@ -532,6 +534,60 @@ simple_object_write_add_data (simple_object_write *sobj ATTRIBUTE_UNUSED,
   return NULL;
 }
 
+/* Add relocation to a section.  */
+
+void
+simple_object_write_add_relocation (simple_object_write_section *section,
+			      unsigned long offset, long addend, const char *name, unsigned long rel_sec_idx)
+{
+  struct simple_object_write_section_relocation *wsr;
+
+  wsr = XNEW (struct simple_object_write_section_relocation);
+  wsr->next = NULL;
+  wsr->offset = offset;
+  wsr->addend = addend;
+  wsr->name = name;
+  wsr->rel_sec_idx = rel_sec_idx;
+
+  if (section->last_relocation == NULL)
+    {
+      section->relocations = wsr;
+      section->last_relocation = wsr;
+    }
+  else
+    {
+      section->last_relocation->next = wsr;
+      section->last_relocation = wsr;
+    }
+
+}
+
+void simple_object_modify_buffer (simple_object_write_section *section, 
+                  unsigned long offset, unsigned char *buffer, int copy)
+{
+  struct simple_object_write_section_buffer *wsb;
+  unsigned long curr_offset = 0;
+  for(wsb = section->buffers; wsb != NULL; wsb=wsb->next)
+  {
+    if(offset == curr_offset)
+    {
+      if (!copy)
+      {
+        wsb->buffer = buffer;
+        wsb->free_buffer = NULL;
+      }
+      else
+      {
+        wsb->free_buffer = (void *) XNEWVEC (char, wsb->size);
+        memcpy (wsb->free_buffer, buffer, wsb->size);
+        wsb->buffer = wsb->free_buffer;
+      }
+    }
+    curr_offset+=wsb->size;
+  }
+
+}
+
 /* Write the complete object file.  */
 
 const char *
@@ -540,26 +596,32 @@ simple_object_write_to_file (simple_object_write *sobj, int descriptor,
 {
   return sobj->functions->write_to_file (sobj, descriptor, err);
 }
-/*Adds a symbol in to common*/
+/* Adds a symbol to .symtab. If shndx is -1 add it to COMMON */
 void
-simple_object_write_add_symbol(simple_object_write *sobj, const char *name,
-size_t size, unsigned int align)
+simple_object_write_add_symbol(simple_object_write *sobj, 
+              const char *name, unsigned int value, 
+              size_t size, unsigned char bind, 
+              unsigned char type, unsigned short int shndx, unsigned char st_other)
 {
   simple_object_symbol *symbol;
-  symbol=XNEW(simple_object_symbol);
-  symbol->next=NULL;
-  symbol->name=xstrdup(name);
-  symbol->align=align;
-  symbol->size=size;
+  symbol = XNEW(simple_object_symbol);
+  symbol->next = NULL;
+  symbol->name = xstrdup(name);
+  symbol->value = value;
+  symbol->size = size;
+  symbol->bind = bind;
+  symbol->type = type;
+  symbol->shndx = shndx;
+  symbol->st_other = st_other;
   if(sobj->last_symbol==NULL)
   {
-    sobj->symbols=symbol;
-    sobj->last_symbol=symbol;
+    sobj->symbols = symbol;
+    sobj->last_symbol = symbol;
   }
   else
   {
-    sobj->last_symbol->next=symbol;
-    sobj->last_symbol=symbol;
+    sobj->last_symbol->next = symbol;
+    sobj->last_symbol = symbol;
   }
 }
 
@@ -576,6 +638,7 @@ simple_object_release_write (simple_object_write *sobj)
   while (section != NULL)
     {
       struct simple_object_write_section_buffer *buffer;
+      struct simple_object_write_section_relocation *relocation;
       simple_object_write_section *next_section;
 
       buffer = section->buffers;
@@ -588,6 +651,14 @@ simple_object_release_write (simple_object_write *sobj)
 	  next_buffer = buffer->next;
 	  XDELETE (buffer);
 	  buffer = next_buffer;
+	}
+     while (relocation != NULL)
+	{
+	  struct simple_object_write_section_relocation *next_relocation;
+
+	  next_relocation = relocation->next;
+	  XDELETE (relocation);
+	  relocation = next_relocation;
 	}
 
       next_section = section->next;

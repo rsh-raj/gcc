@@ -823,13 +823,6 @@ lhd_begin_section (const char *name)
 
   if (flag_bypass_asm)
     {
-      static int initialized = false;
-      if (!initialized)
-	{
-	  gcc_assert (asm_out_file == NULL);
-          lto_set_current_out_file (lto_obj_file_open (asm_file_name, true));
-	  initialized = true;
-	}
       lto_obj_begin_section (name);
       return;
     }
