@@ -158,8 +158,8 @@ struct GTY(()) cfa_reg {
    Instead of passing around REG and OFFSET, we pass a copy
    of this structure.  */
 struct GTY(()) dw_cfa_location {
-  poly_int64_pod offset;
-  poly_int64_pod base_offset;
+  poly_int64 offset;
+  poly_int64 base_offset;
   /* REG is in DWARF_FRAME_REGNUM space, *not* normal REGNO space.  */
   struct cfa_reg reg;
   BOOL_BITFIELD indirect : 1;  /* 1 if CFA is accessed via a dereference.  */
@@ -418,7 +418,18 @@ struct fixed_point_type_info
       struct { tree numerator; tree denominator; } arbitrary;
     } scale_factor;
 };
+/*Struct to hold compilation unit header need for .debug_info*/
+typedef struct dw_cu_header_struct
+{
+    uint32_t length;
+    uint16_t version;
+    uint8_t unit_type;
+    uint8_t address_size;
+    uint32_t debug_abbrev_offset;
+}
+dw_cu_header;
 
+void dwarf2cfi_cc_finalize (void);
 void dwarf2out_cc_finalize (void);
 
 /* Some DWARF internals are exposed for the needs of DWARF-based debug
